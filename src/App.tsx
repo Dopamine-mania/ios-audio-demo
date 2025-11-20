@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import { useState, useRef } from 'react';
 
 // 全局变量：保持引用防止被垃圾回收(GC)
 let audioContext: AudioContext | null = null;
