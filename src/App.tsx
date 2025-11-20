@@ -1,207 +1,111 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef } from 'react';
 
-// 全局变量：保持引用防止被垃圾回收(GC)
-let audioContext: AudioContext | null = null;
-let silentSourceNode: AudioBufferSourceNode | null = null;
+// 定义 MediaSession 类型以避免 TS 报错
+declare global {
+  interface Window {
+    webkitAudioContext: typeof AudioContext;
+  }
+}
 
 function App() {
-  const [status, setStatus] = useState('Ready. Click "Initialize Audio" first.');
-  const [isPlaying, setIsPlaying] = useState(false);
-  const isInitialized = useRef(false);
+  const [status, setStatus] = useState('Waiting for user interaction...');
+  // 核心改变1：使用 useRef 直接引用 DOM 中的 audio 标签
   const audioRef = useRef<HTMLAudioElement>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
 
-  // --- 核心功能 1: 初始化音频上下文 ---
-  const initializeAudio = async () => {
-    if (isInitialized.current) return;
+  // 初始化 MediaSession 的独立函数
+  const initMediaSession = () => {
+    if ('mediaSession' in navigator) {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: 'Resonance Gatekeeper',
+        artist: 'System V3',
+        album: 'Audio Core',
+        artwork: [
+          // 使用一个极高概率能加载的图片，比如 placeholder 或你自己的 logo
+          { src: 'https://via.placeholder.com/512.png?text=Play', sizes: '512x512', type: 'image/png' }
+        ]
+      });
 
-    try {
-      setStatus('Initializing Audio Context...');
-
-      // 1. 创建 Web Audio Context (兼容写法)
-      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-      audioContext = new AudioContextClass();
-
-      // 2. 【关键技巧】创建静音底座 (Silent Base)
-      // 内存优化：只创建 1秒 的 buffer，而不是 30分钟
-      const silentBuffer = audioContext.createBuffer(1, audioContext.sampleRate * 1, audioContext.sampleRate);
-
-      // 噪音注入：填充极微小的噪音 (0.00001)，防止系统检测到纯静音而优化掉音频线程
-      const channelData = silentBuffer.getChannelData(0);
-      for (let i = 0; i < channelData.length; i++) {
-        channelData[i] = Math.random() * 0.00001;
-      }
-
-      // 3. 启动静音循环
-      silentSourceNode = audioContext.createBufferSource();
-      silentSourceNode.buffer = silentBuffer;
-      silentSourceNode.loop = true; // 无限循环
-      silentSourceNode.connect(audioContext.destination);
-      silentSourceNode.start(0);
-
-      setStatus('Initializing HTML5 Audio...');
-
-      // 4. 【Plan B】初始化 HTML5 Audio 元素
-      if (audioRef.current) {
-        audioRef.current.load();
-        // 预加载音频
-        await audioRef.current.play().catch(() => {
-          // 可能会因为浏览器策略失败，这是正常的
-        });
-        audioRef.current.pause();
-      }
-
-      // 5. 【护身符】注册 MediaSession
-      // 这会让锁屏界面显示播放控件，极大幅度降低被杀后台的概率
-      if ('mediaSession' in navigator) {
-        navigator.mediaSession.metadata = new MediaMetadata({
-          title: 'Gatekeeper Demo',
-          artist: 'Resonance Team',
-          album: 'V2.1 (HTML5 Audio)',
-          artwork: [
-            { src: 'https://via.placeholder.com/512', sizes: '512x512', type: 'image/png' }
-          ]
-        });
-
-        // 绑定系统原生控制中心的按钮事件
-        navigator.mediaSession.setActionHandler('play', () => {
-          if (audioRef.current) {
-            audioRef.current.play();
-            setIsPlaying(true);
-            setStatus('Playing... Now LOCK YOUR SCREEN!');
-          }
-        });
-
-        navigator.mediaSession.setActionHandler('pause', () => {
-          if (audioRef.current) {
-            audioRef.current.pause();
-            setIsPlaying(false);
-            setStatus('Paused.');
-          }
-        });
-      }
-
-      isInitialized.current = true;
-      setStatus('Ready to play. Do not close tab!');
-    } catch (error) {
-      console.error('Initialization failed:', error);
-      setStatus(`Error: ${(error as Error).message}`);
-    }
-  };
-
-  // --- 核心功能 2: 播放控制 ---
-  const togglePlayPause = async () => {
-    if (!isInitialized.current) {
-      setStatus('Please initialize audio first!');
-      return;
-    }
-
-    // iOS 策略要求：必须确保 Context 是运行状态
-    if (audioContext && audioContext.state === 'suspended') {
-      await audioContext.resume();
-    }
-
-    if (!audioRef.current) return;
-
-    if (isPlaying) {
-      // 暂停逻辑
-      audioRef.current.pause();
-      setIsPlaying(false);
-      setStatus('Paused.');
-      if (navigator.mediaSession) navigator.mediaSession.playbackState = 'paused';
-    } else {
-      // 播放逻辑
-      try {
-        await audioRef.current.play();
+      // 绑定控制中心事件，防止点击锁屏暂停后无法恢复
+      navigator.mediaSession.setActionHandler('play', () => {
+        audioRef.current?.play();
         setIsPlaying(true);
-        setStatus('Playing... Now LOCK YOUR SCREEN!');
-        if (navigator.mediaSession) navigator.mediaSession.playbackState = 'playing';
-      } catch (error) {
-        console.error('Play failed:', error);
-        setStatus('Play failed. Try again.');
-      }
+      });
+      navigator.mediaSession.setActionHandler('pause', () => {
+        audioRef.current?.pause();
+        setIsPlaying(false);
+      });
     }
   };
 
-  // 监听音频事件
-  useEffect(() => {
+  // --- 核心改变2：同步启动 ---
+  // 这个函数必须绑定在 onClick 上，且不能是 async 的（至少 play() 不能在 await 之后）
+  const handleStart = () => {
     const audio = audioRef.current;
     if (!audio) return;
 
-    const handleEnded = () => {
-      setIsPlaying(false);
-      setStatus('Audio ended. Click Play to restart.');
-    };
+    setStatus('Requesting System Access...');
 
-    const handleError = (e: Event) => {
-      console.error('Audio error:', e);
-      setStatus('Audio error occurred.');
-    };
+    // 1. 立即播放！不要等待任何 fetch 或 decode
+    // 即使 audio.src 还没缓冲完，这个同步的 play() 调用也会拿到 iOS 的"金牌令箭"
+    audio.play()
+      .then(() => {
+        setStatus('Playing! Now LOCK SCREEN immediately.');
+        setIsPlaying(true);
+        initMediaSession(); // 注册锁屏信息
+      })
+      .catch((e) => {
+        console.error(e);
+        setStatus(`Fail: ${e.message}`);
+      });
 
-    audio.addEventListener('ended', handleEnded);
-    audio.addEventListener('error', handleError);
-
-    return () => {
-      audio.removeEventListener('ended', handleEnded);
-      audio.removeEventListener('error', handleError);
-    };
-  }, []);
+    // 可以在这里后续处理 Web Audio API 的逻辑，但 HTML5 Audio 必须先行
+  };
 
   return (
-    <div style={{ padding: '40px 20px', fontFamily: 'system-ui, sans-serif', textAlign: 'center', maxWidth: '600px', margin: '0 auto' }}>
-      {/* 【Plan B】HTML5 Audio 标签 */}
+    <div style={{ padding: '40px 20px', fontFamily: 'system-ui', textAlign: 'center' }}>
+      <h1>iOS Gatekeeper V3</h1>
+      <p style={{ color: '#666' }}>Sync-Trigger Strategy</p>
+
+      {/*
+        核心改变3：显式 DOM 元素
+        playsInline: 防止 iOS 自动全屏视频播放器模式
+        loop: 必须循环
+        muted: 千万不要设为 true！muted 无法后台播放。
+      */}
       <audio
         ref={audioRef}
         src="/test-music.mp3"
         loop
-        preload="auto"
-        style={{ display: 'none' }}
+        playsInline
+        style={{ width: '100%', marginTop: '20px' }}
+        controls // 开发阶段显示控件方便调试
       />
 
-      <h1>iOS Audio Gatekeeper</h1>
-      <p style={{color: '#666', marginBottom: '30px'}}>
-        V2.1 (Plan B: HTML5 Audio + Web Audio API)
-      </p>
-
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
+      <div style={{ marginTop: '30px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
         <button
-          onClick={initializeAudio}
-          disabled={isInitialized.current}
+          onClick={handleStart}
           style={{
-            padding: '15px', fontSize: '18px',
-            background: isInitialized.current ? '#ccc' : '#007AFF',
-            color: 'white', border: 'none', borderRadius: '12px',
-            cursor: isInitialized.current ? 'not-allowed' : 'pointer'
+            padding: '20px',
+            fontSize: '20px',
+            background: isPlaying ? '#34C759' : '#007AFF',
+            color: 'white',
+            border: 'none',
+            borderRadius: '16px',
+            fontWeight: 'bold'
           }}
         >
-          1. Initialize Audio Engine
-        </button>
-
-        <button
-          onClick={togglePlayPause}
-          disabled={!isInitialized.current}
-          style={{
-            padding: '15px', fontSize: '18px',
-            background: !isInitialized.current ? '#ccc' : '#34C759',
-            color: 'white', border: 'none', borderRadius: '12px',
-            cursor: !isInitialized.current ? 'not-allowed' : 'pointer'
-          }}
-        >
-          2. Toggle Play / Pause
+          {isPlaying ? 'Playing (Check Lock Screen)' : 'TAP HERE TO START'}
         </button>
       </div>
 
-      <div style={{ marginTop: '30px', padding: '15px', background: '#f5f5f7', borderRadius: '12px', border: '1px solid #e1e1e1' }}>
-        <strong>Status Log:</strong>
-        <div style={{marginTop: '5px', color: '#FF3B30', fontWeight: '600'}}>{status}</div>
+      <div style={{ marginTop: '20px', padding: '10px', background: '#eee', borderRadius: '8px' }}>
+        Status: <strong>{status}</strong>
       </div>
 
-      <p style={{marginTop: '30px', fontSize: '14px', color: '#888'}}>
-        Test Requirement: Lock screen for &gt; 1 minute and check if audio continues.
+      <p style={{fontSize: '12px', color: '#999', marginTop: '40px'}}>
+        Debug Tip: Ensure your iPhone is NOT in Silent Mode (Ringer Switch) for initial test.
       </p>
-
-      <div style={{marginTop: '20px', padding: '10px', background: '#fff3cd', borderRadius: '8px', fontSize: '12px', color: '#856404'}}>
-        <strong>🔧 Plan B Enabled:</strong> Using HTML5 Audio + Web Audio API dual approach for maximum iOS compatibility.
-      </div>
     </div>
   );
 }
