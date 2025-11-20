@@ -12,19 +12,28 @@ function App() {
   const audioRef = useRef<HTMLAudioElement>(null);
   const [isPlaying, setIsPlaying] = useState(false);
 
-  // 更新MediaSession播放位置状态
+  // 更新MediaSession播放位置状态 - 修正版
   const updatePositionState = () => {
     const audio = audioRef.current;
-    if (!audio || !navigator.mediaSession) return;
+
+    // 【关键修复1】严格检查 duration 必须是有限数值
+    if (
+      !audio ||
+      !navigator.mediaSession ||
+      !Number.isFinite(audio.duration) ||
+      audio.duration <= 0
+    ) {
+      return;
+    }
 
     try {
       navigator.mediaSession.setPositionState({
-        duration: audio.duration || 120, // 如果duration未知，默认120秒
+        duration: audio.duration,
         playbackRate: audio.playbackRate,
         position: audio.currentTime
       });
     } catch (error) {
-      console.error('Error updating position state:', error);
+      console.warn('MediaSession position update failed:', error);
     }
   };
 
@@ -35,22 +44,25 @@ function App() {
 
     navigator.mediaSession.metadata = new MediaMetadata({
       title: 'Resonance Gatekeeper',
-      artist: 'System V3',
+      artist: 'System V3.2',
       album: 'Audio Core',
       artwork: [
         { src: 'https://via.placeholder.com/512.png?text=Play', sizes: '512x512', type: 'image/png' }
       ]
     });
 
-    // 播放/暂停控制
+    // 播放控制 - 状态突变时更新
     navigator.mediaSession.setActionHandler('play', () => {
       audio.play();
       setIsPlaying(true);
+      updatePositionState(); // 状态突变时更新
     });
 
+    // 暂停控制 - 状态突变时更新
     navigator.mediaSession.setActionHandler('pause', () => {
       audio.pause();
       setIsPlaying(false);
+      updatePositionState(); // 状态突变时更新
     });
 
     // 停止控制
@@ -58,13 +70,14 @@ function App() {
       audio.pause();
       audio.currentTime = 0;
       setIsPlaying(false);
+      updatePositionState();
     });
 
-    // 进度拖动控制（关键！）
+    // 【关键修复2】进度拖动控制 - 立即同步防止UI回弹
     navigator.mediaSession.setActionHandler('seekto', (details) => {
       if (details.seekTime !== undefined) {
         audio.currentTime = details.seekTime;
-        updatePositionState();
+        updatePositionState(); // 立即告诉系统我们跳过去了
       }
     });
 
@@ -86,7 +99,7 @@ function App() {
     updatePositionState();
   };
 
-  // 监听音频事件
+  // 【关键修复3】只在状态突变时监听，绝不在 timeupdate 中更新
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
@@ -97,32 +110,49 @@ function App() {
       updatePositionState();
     };
 
-    // 播放位置更新（定期更新位置状态）
-    const handleTimeUpdate = () => {
-      updatePositionState();
-    };
-
     // 播放开始
     const handlePlay = () => {
       setIsPlaying(true);
-      updatePositionState();
+      updatePositionState(); // 状态突变
     };
 
     // 暂停
     const handlePause = () => {
       setIsPlaying(false);
+      updatePositionState(); // 状态突变
     };
 
+    // 跳转完成后同步一次
+    const handleSeeked = () => {
+      updatePositionState();
+    };
+
+    // 倍速改变时（虽然我们没用到，但为了完整性）
+    const handleRateChange = () => {
+      updatePositionState();
+    };
+
+    // 【关键修复4】实现循环播放 - 不使用原生loop属性
+    const handleEnded = () => {
+      audio.currentTime = 0;
+      audio.play();
+    };
+
+    // 【重要】移除了 timeupdate 监听器！
     audio.addEventListener('loadedmetadata', handleLoadedMetadata);
-    audio.addEventListener('timeupdate', handleTimeUpdate);
     audio.addEventListener('play', handlePlay);
     audio.addEventListener('pause', handlePause);
+    audio.addEventListener('seeked', handleSeeked);
+    audio.addEventListener('ratechange', handleRateChange);
+    audio.addEventListener('ended', handleEnded);
 
     return () => {
       audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
-      audio.removeEventListener('timeupdate', handleTimeUpdate);
       audio.removeEventListener('play', handlePlay);
       audio.removeEventListener('pause', handlePause);
+      audio.removeEventListener('seeked', handleSeeked);
+      audio.removeEventListener('ratechange', handleRateChange);
+      audio.removeEventListener('ended', handleEnded);
     };
   }, []);
 
@@ -148,13 +178,13 @@ function App() {
 
   return (
     <div style={{ padding: '40px 20px', fontFamily: 'system-ui', textAlign: 'center' }}>
-      <h1>iOS Gatekeeper V3.1</h1>
-      <p style={{ color: '#666' }}>Sync-Trigger + Seekable Controls</p>
+      <h1>iOS Gatekeeper V3.2</h1>
+      <p style={{ color: '#666' }}>Fixed: No Over-feeding</p>
 
+      {/* 【关键修复5】移除 loop 属性，改用 JS 实现循环 */}
       <audio
         ref={audioRef}
         src="/test-music.mp3"
-        loop
         playsInline
         style={{ width: '100%', marginTop: '20px' }}
         controls
@@ -173,7 +203,7 @@ function App() {
             fontWeight: 'bold'
           }}
         >
-          {isPlaying ? '✅ Playing (Check Lock Screen)' : '▶️ TAP HERE TO START'}
+          {isPlaying ? '✅ Playing (Test Progress Bar!)' : '▶️ TAP HERE TO START'}
         </button>
       </div>
 
@@ -181,13 +211,14 @@ function App() {
         Status: <strong>{status}</strong>
       </div>
 
-      <div style={{ marginTop: '20px', padding: '15px', background: '#e8f5e9', borderRadius: '8px', fontSize: '13px', textAlign: 'left' }}>
-        <strong>✅ Features Enabled:</strong>
+      <div style={{ marginTop: '20px', padding: '15px', background: '#e3f2fd', borderRadius: '8px', fontSize: '13px', textAlign: 'left' }}>
+        <strong>🔧 V3.2 Fixes (Based on Gemini):</strong>
         <ul style={{ margin: '10px 0', paddingLeft: '20px' }}>
-          <li>🔒 Lock Screen Playback</li>
-          <li>📊 Lock Screen Controls</li>
-          <li>⏩ Seek / Progress Bar (Drag)</li>
-          <li>⏪⏩ Skip Forward/Backward</li>
+          <li>❌ Removed timeupdate listener</li>
+          <li>✅ Only update on state changes</li>
+          <li>✅ Check duration is finite</li>
+          <li>✅ Removed native loop attribute</li>
+          <li>✅ JS-based loop via ended event</li>
         </ul>
       </div>
 
