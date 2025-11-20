@@ -1,15 +1,14 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 
 // 全局变量：保持引用防止被垃圾回收(GC)
 let audioContext: AudioContext | null = null;
-let musicSourceNode: AudioBufferSourceNode | null = null;
 let silentSourceNode: AudioBufferSourceNode | null = null;
-let musicBuffer: AudioBuffer | null = null;
-let isPlaying = false;
 
 function App() {
   const [status, setStatus] = useState('Ready. Click "Initialize Audio" first.');
+  const [isPlaying, setIsPlaying] = useState(false);
   const isInitialized = useRef(false);
+  const audioRef = useRef<HTMLAudioElement>(null);
 
   // --- 核心功能 1: 初始化音频上下文 ---
   const initializeAudio = async () => {
@@ -18,7 +17,7 @@ function App() {
     try {
       setStatus('Initializing Audio Context...');
 
-      // 1. 创建 Context (兼容写法)
+      // 1. 创建 Web Audio Context (兼容写法)
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
       audioContext = new AudioContextClass();
 
@@ -39,11 +38,17 @@ function App() {
       silentSourceNode.connect(audioContext.destination);
       silentSourceNode.start(0);
 
-      setStatus('Loading music file...');
-      // 4. 加载真正的音乐文件
-      const response = await fetch('/test-music.mp3');
-      const arrayBuffer = await response.arrayBuffer();
-      musicBuffer = await audioContext.decodeAudioData(arrayBuffer);
+      setStatus('Initializing HTML5 Audio...');
+
+      // 4. 【Plan B】初始化 HTML5 Audio 元素
+      if (audioRef.current) {
+        audioRef.current.load();
+        // 预加载音频
+        await audioRef.current.play().catch(() => {
+          // 可能会因为浏览器策略失败，这是正常的
+        });
+        audioRef.current.pause();
+      }
 
       // 5. 【护身符】注册 MediaSession
       // 这会让锁屏界面显示播放控件，极大幅度降低被杀后台的概率
@@ -51,15 +56,28 @@ function App() {
         navigator.mediaSession.metadata = new MediaMetadata({
           title: 'Gatekeeper Demo',
           artist: 'Resonance Team',
-          album: 'V1.0',
+          album: 'V2.1 (HTML5 Audio)',
           artwork: [
             { src: 'https://via.placeholder.com/512', sizes: '512x512', type: 'image/png' }
           ]
         });
 
         // 绑定系统原生控制中心的按钮事件
-        navigator.mediaSession.setActionHandler('play', () => togglePlayPause());
-        navigator.mediaSession.setActionHandler('pause', () => togglePlayPause());
+        navigator.mediaSession.setActionHandler('play', () => {
+          if (audioRef.current) {
+            audioRef.current.play();
+            setIsPlaying(true);
+            setStatus('Playing... Now LOCK YOUR SCREEN!');
+          }
+        });
+
+        navigator.mediaSession.setActionHandler('pause', () => {
+          if (audioRef.current) {
+            audioRef.current.pause();
+            setIsPlaying(false);
+            setStatus('Paused.');
+          }
+        });
       }
 
       isInitialized.current = true;
@@ -72,43 +90,76 @@ function App() {
 
   // --- 核心功能 2: 播放控制 ---
   const togglePlayPause = async () => {
-    if (!isInitialized.current || !audioContext || !musicBuffer) {
+    if (!isInitialized.current) {
       setStatus('Please initialize audio first!');
       return;
     }
 
     // iOS 策略要求：必须确保 Context 是运行状态
-    if (audioContext.state === 'suspended') {
+    if (audioContext && audioContext.state === 'suspended') {
       await audioContext.resume();
     }
 
+    if (!audioRef.current) return;
+
     if (isPlaying) {
       // 暂停逻辑
-      try {
-        musicSourceNode?.stop();
-        musicSourceNode = null;
-        isPlaying = false;
-        setStatus('Paused.');
-        if(navigator.mediaSession) navigator.mediaSession.playbackState = 'paused';
-      } catch (e) { console.log(e); }
+      audioRef.current.pause();
+      setIsPlaying(false);
+      setStatus('Paused.');
+      if (navigator.mediaSession) navigator.mediaSession.playbackState = 'paused';
     } else {
       // 播放逻辑
-      musicSourceNode = audioContext.createBufferSource();
-      musicSourceNode.buffer = musicBuffer;
-      musicSourceNode.loop = true; // 音乐也开启循环方便测试
-      musicSourceNode.connect(audioContext.destination);
-      musicSourceNode.start(0);
-      isPlaying = true;
-      setStatus('Playing... Now LOCK YOUR SCREEN!');
-      if(navigator.mediaSession) navigator.mediaSession.playbackState = 'playing';
+      try {
+        await audioRef.current.play();
+        setIsPlaying(true);
+        setStatus('Playing... Now LOCK YOUR SCREEN!');
+        if (navigator.mediaSession) navigator.mediaSession.playbackState = 'playing';
+      } catch (error) {
+        console.error('Play failed:', error);
+        setStatus('Play failed. Try again.');
+      }
     }
   };
 
+  // 监听音频事件
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    const handleEnded = () => {
+      setIsPlaying(false);
+      setStatus('Audio ended. Click Play to restart.');
+    };
+
+    const handleError = (e: Event) => {
+      console.error('Audio error:', e);
+      setStatus('Audio error occurred.');
+    };
+
+    audio.addEventListener('ended', handleEnded);
+    audio.addEventListener('error', handleError);
+
+    return () => {
+      audio.removeEventListener('ended', handleEnded);
+      audio.removeEventListener('error', handleError);
+    };
+  }, []);
+
   return (
     <div style={{ padding: '40px 20px', fontFamily: 'system-ui, sans-serif', textAlign: 'center', maxWidth: '600px', margin: '0 auto' }}>
+      {/* 【Plan B】HTML5 Audio 标签 */}
+      <audio
+        ref={audioRef}
+        src="/test-music.mp3"
+        loop
+        preload="auto"
+        style={{ display: 'none' }}
+      />
+
       <h1>iOS Audio Gatekeeper</h1>
       <p style={{color: '#666', marginBottom: '30px'}}>
-        V2.0 (Memory Optimized + MediaSession)
+        V2.1 (Plan B: HTML5 Audio + Web Audio API)
       </p>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
@@ -118,7 +169,8 @@ function App() {
           style={{
             padding: '15px', fontSize: '18px',
             background: isInitialized.current ? '#ccc' : '#007AFF',
-            color: 'white', border: 'none', borderRadius: '12px'
+            color: 'white', border: 'none', borderRadius: '12px',
+            cursor: isInitialized.current ? 'not-allowed' : 'pointer'
           }}
         >
           1. Initialize Audio Engine
@@ -130,7 +182,8 @@ function App() {
           style={{
             padding: '15px', fontSize: '18px',
             background: !isInitialized.current ? '#ccc' : '#34C759',
-            color: 'white', border: 'none', borderRadius: '12px'
+            color: 'white', border: 'none', borderRadius: '12px',
+            cursor: !isInitialized.current ? 'not-allowed' : 'pointer'
           }}
         >
           2. Toggle Play / Pause
@@ -145,6 +198,10 @@ function App() {
       <p style={{marginTop: '30px', fontSize: '14px', color: '#888'}}>
         Test Requirement: Lock screen for &gt; 1 minute and check if audio continues.
       </p>
+
+      <div style={{marginTop: '20px', padding: '10px', background: '#fff3cd', borderRadius: '8px', fontSize: '12px', color: '#856404'}}>
+        <strong>🔧 Plan B Enabled:</strong> Using HTML5 Audio + Web Audio API dual approach for maximum iOS compatibility.
+      </div>
     </div>
   );
 }
