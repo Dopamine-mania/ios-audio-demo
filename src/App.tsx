@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 
 // 定义 MediaSession 类型以避免 TS 报错
 declare global {
@@ -9,45 +9,131 @@ declare global {
 
 function App() {
   const [status, setStatus] = useState('Waiting for user interaction...');
-  // 核心改变1：使用 useRef 直接引用 DOM 中的 audio 标签
   const audioRef = useRef<HTMLAudioElement>(null);
   const [isPlaying, setIsPlaying] = useState(false);
 
-  // 初始化 MediaSession 的独立函数
-  const initMediaSession = () => {
-    if ('mediaSession' in navigator) {
-      navigator.mediaSession.metadata = new MediaMetadata({
-        title: 'Resonance Gatekeeper',
-        artist: 'System V3',
-        album: 'Audio Core',
-        artwork: [
-          // 使用一个极高概率能加载的图片，比如 placeholder 或你自己的 logo
-          { src: 'https://via.placeholder.com/512.png?text=Play', sizes: '512x512', type: 'image/png' }
-        ]
-      });
+  // 更新MediaSession播放位置状态
+  const updatePositionState = () => {
+    const audio = audioRef.current;
+    if (!audio || !navigator.mediaSession) return;
 
-      // 绑定控制中心事件，防止点击锁屏暂停后无法恢复
-      navigator.mediaSession.setActionHandler('play', () => {
-        audioRef.current?.play();
-        setIsPlaying(true);
+    try {
+      navigator.mediaSession.setPositionState({
+        duration: audio.duration || 120, // 如果duration未知，默认120秒
+        playbackRate: audio.playbackRate,
+        position: audio.currentTime
       });
-      navigator.mediaSession.setActionHandler('pause', () => {
-        audioRef.current?.pause();
-        setIsPlaying(false);
-      });
+    } catch (error) {
+      console.error('Error updating position state:', error);
     }
   };
 
-  // --- 核心改变2：同步启动 ---
-  // 这个函数必须绑定在 onClick 上，且不能是 async 的（至少 play() 不能在 await 之后）
+  // 初始化 MediaSession 的独立函数
+  const initMediaSession = () => {
+    const audio = audioRef.current;
+    if (!audio || !('mediaSession' in navigator)) return;
+
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: 'Resonance Gatekeeper',
+      artist: 'System V3',
+      album: 'Audio Core',
+      artwork: [
+        { src: 'https://via.placeholder.com/512.png?text=Play', sizes: '512x512', type: 'image/png' }
+      ]
+    });
+
+    // 播放/暂停控制
+    navigator.mediaSession.setActionHandler('play', () => {
+      audio.play();
+      setIsPlaying(true);
+    });
+
+    navigator.mediaSession.setActionHandler('pause', () => {
+      audio.pause();
+      setIsPlaying(false);
+    });
+
+    // 停止控制
+    navigator.mediaSession.setActionHandler('stop', () => {
+      audio.pause();
+      audio.currentTime = 0;
+      setIsPlaying(false);
+    });
+
+    // 进度拖动控制（关键！）
+    navigator.mediaSession.setActionHandler('seekto', (details) => {
+      if (details.seekTime !== undefined) {
+        audio.currentTime = details.seekTime;
+        updatePositionState();
+      }
+    });
+
+    // 快退控制
+    navigator.mediaSession.setActionHandler('seekbackward', (details) => {
+      const skipTime = details.seekOffset || 10;
+      audio.currentTime = Math.max(audio.currentTime - skipTime, 0);
+      updatePositionState();
+    });
+
+    // 快进控制
+    navigator.mediaSession.setActionHandler('seekforward', (details) => {
+      const skipTime = details.seekOffset || 10;
+      audio.currentTime = Math.min(audio.currentTime + skipTime, audio.duration || 0);
+      updatePositionState();
+    });
+
+    // 初始化位置状态
+    updatePositionState();
+  };
+
+  // 监听音频事件
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    // 音频元数据加载完成（获取到时长）
+    const handleLoadedMetadata = () => {
+      console.log('Audio metadata loaded, duration:', audio.duration);
+      updatePositionState();
+    };
+
+    // 播放位置更新（定期更新位置状态）
+    const handleTimeUpdate = () => {
+      updatePositionState();
+    };
+
+    // 播放开始
+    const handlePlay = () => {
+      setIsPlaying(true);
+      updatePositionState();
+    };
+
+    // 暂停
+    const handlePause = () => {
+      setIsPlaying(false);
+    };
+
+    audio.addEventListener('loadedmetadata', handleLoadedMetadata);
+    audio.addEventListener('timeupdate', handleTimeUpdate);
+    audio.addEventListener('play', handlePlay);
+    audio.addEventListener('pause', handlePause);
+
+    return () => {
+      audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
+      audio.removeEventListener('timeupdate', handleTimeUpdate);
+      audio.removeEventListener('play', handlePlay);
+      audio.removeEventListener('pause', handlePause);
+    };
+  }, []);
+
+  // 同步启动函数
   const handleStart = () => {
     const audio = audioRef.current;
     if (!audio) return;
 
     setStatus('Requesting System Access...');
 
-    // 1. 立即播放！不要等待任何 fetch 或 decode
-    // 即使 audio.src 还没缓冲完，这个同步的 play() 调用也会拿到 iOS 的"金牌令箭"
+    // 立即播放！不要等待任何 fetch 或 decode
     audio.play()
       .then(() => {
         setStatus('Playing! Now LOCK SCREEN immediately.');
@@ -58,28 +144,20 @@ function App() {
         console.error(e);
         setStatus(`Fail: ${e.message}`);
       });
-
-    // 可以在这里后续处理 Web Audio API 的逻辑，但 HTML5 Audio 必须先行
   };
 
   return (
     <div style={{ padding: '40px 20px', fontFamily: 'system-ui', textAlign: 'center' }}>
-      <h1>iOS Gatekeeper V3</h1>
-      <p style={{ color: '#666' }}>Sync-Trigger Strategy</p>
+      <h1>iOS Gatekeeper V3.1</h1>
+      <p style={{ color: '#666' }}>Sync-Trigger + Seekable Controls</p>
 
-      {/*
-        核心改变3：显式 DOM 元素
-        playsInline: 防止 iOS 自动全屏视频播放器模式
-        loop: 必须循环
-        muted: 千万不要设为 true！muted 无法后台播放。
-      */}
       <audio
         ref={audioRef}
         src="/test-music.mp3"
         loop
         playsInline
         style={{ width: '100%', marginTop: '20px' }}
-        controls // 开发阶段显示控件方便调试
+        controls
       />
 
       <div style={{ marginTop: '30px', display: 'flex', flexDirection: 'column', gap: '20px' }}>
@@ -95,12 +173,22 @@ function App() {
             fontWeight: 'bold'
           }}
         >
-          {isPlaying ? 'Playing (Check Lock Screen)' : 'TAP HERE TO START'}
+          {isPlaying ? '✅ Playing (Check Lock Screen)' : '▶️ TAP HERE TO START'}
         </button>
       </div>
 
       <div style={{ marginTop: '20px', padding: '10px', background: '#eee', borderRadius: '8px' }}>
         Status: <strong>{status}</strong>
+      </div>
+
+      <div style={{ marginTop: '20px', padding: '15px', background: '#e8f5e9', borderRadius: '8px', fontSize: '13px', textAlign: 'left' }}>
+        <strong>✅ Features Enabled:</strong>
+        <ul style={{ margin: '10px 0', paddingLeft: '20px' }}>
+          <li>🔒 Lock Screen Playback</li>
+          <li>📊 Lock Screen Controls</li>
+          <li>⏩ Seek / Progress Bar (Drag)</li>
+          <li>⏪⏩ Skip Forward/Backward</li>
+        </ul>
       </div>
 
       <p style={{fontSize: '12px', color: '#999', marginTop: '40px'}}>
